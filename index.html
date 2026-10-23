@@ -41,6 +41,12 @@
     <button data-hands="R">右手</button>
   </div>
 
+  <div class="group seg" id="adaptSeg" title="适配小键盘">
+    <button data-toggle="fit" title="把曲子挪进 37 键音域（音域在设置里改）">37键</button>
+    <button data-toggle="simplify" title="和弦精简，每个起音都保留">简化</button>
+    <button data-toggle="showDiff" title="用虚线显示修改前的位置">对比</button>
+  </div>
+
   <div class="group right">
     <button id="midiStatus" class="pill" title="点击重新连接 MIDI 设备">MIDI：检测中…</button>
     <button id="settingsBtn" class="btn icon" title="设置">⚙</button>
@@ -99,6 +105,26 @@
   </section>
 
   <section>
+    <h4>37 键适配 / 简化</h4>
+    <p class="hint">「37键」：先整体移调让最多的音落进音域；还超出的段落（一只手的一个小节）整段按八度挪进来，挪不进来就整段删掉。
+      「简化」：同一只手的和弦只留几个音（右手留高音，左手留低音），每个起音都保留。
+      「对比」：虚线框是修改前的位置，<span class="k-moved">黄 = 挪了八度</span>，<span class="k-dropped">红 = 删掉</span>，<span class="k-simplified">紫 = 简化去掉</span>。</p>
+    <label class="field">音域 <select id="fitLow"></select></label>
+    <button id="calibrate" class="btn small">在琴上按最左边的键来设定</button>
+    <label class="check"><input type="checkbox" id="octaveOnly"> 只按八度移调（保持原调）</label>
+    <label class="field">简化：每只手和弦最多
+      <select id="chordMax">
+        <option value="1">1 个音</option>
+        <option value="2">2 个音</option>
+        <option value="3">3 个音</option>
+      </select>
+    </label>
+    <h4>修改记录</h4>
+    <p id="changeSummary" class="hint"></p>
+    <div id="changes"></div>
+  </section>
+
+  <section>
     <h4>显示</h4>
     <label class="field">下落时长 <input type="range" data-setting="lookahead" min="1" max="6" step="0.5"> <span data-val="lookahead"></span></label>
     <label class="field">音符标注
@@ -147,6 +173,7 @@
 <script src="js/midi.js"></script>
 <script src="js/songs.js"></script>
 <script src="js/synth.js"></script>
+<script src="js/adapt.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

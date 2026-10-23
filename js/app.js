@@ -53,13 +53,14 @@
   const settings = Object.assign({
     speed: 0.6, mode: 'wait', hands: 'both', lookahead: 2.5, labels: 'name', range: 'auto',
     accomp: true, mySound: false, metronome: false, volume: 0.7, octave: 4,
+    fit: false, fitLow: 53, octaveOnly: true, simplify: false, chordMax: 2, showDiff: false,
   }, store.get('settings', {}));
   const saveSettings = () => store.set('settings', settings);
 
   // ---------- 状态 ----------
   const S = {
     song: null, songId: null, partHands: {},
-    notes: [], active: [],
+    notes: [], active: [], ghosts: [], changes: [], shift: 0, calibrating: false,
     t: 0, playing: false, waiting: false, finished: false,
     playIdx: 0, waitIdx: 0, missIdx: 0, beatIdx: 0,
     pressed: new Set(), voices: new Map(), wrongFlash: new Map(), popups: [],
@@ -125,6 +126,7 @@
     store.set('lastSong', id);
     renderTracks();
     applyHands();
+    renderChanges();
     restart();
     updateLoopBand();
     $('#timeTotal').textContent = fmtTime(S.song.duration);
@@ -136,13 +138,21 @@
   // 根据左右手设置重建可见音符
   function applyHands() {
     if (!S.song) return;
-    const notes = [];
+    let notes = [];
     for (const n of S.song.notes) {
       const ph = S.partHands[n.part] || 'R';
       if (ph === 'off') continue;
       const hand = ph === 'split' ? (n.pitch >= 60 ? 'R' : 'L') : ph;
       notes.push({ pitch: n.pitch, start: n.start, dur: n.dur, vel: n.vel, hand, state: 0, active: false });
     }
+    const res = PF_adapt(notes, S.song.beats, {
+      fit: settings.fit, lo: settings.fitLow, hi: settings.fitLow + 36, octaveOnly: settings.octaveOnly,
+      simplify: settings.simplify, chordMax: settings.chordMax,
+    });
+    S.ghosts = res.ghosts;
+    S.changes = res.changes;
+    S.shift = res.shift;
+    notes = res.notes;
     for (const n of notes) n.active = settings.hands === 'both' || n.hand === settings.hands;
     S.notes = notes;
     S.active = notes.filter(n => n.active);
@@ -248,7 +258,8 @@
     S.finished = true;
     const st = S.stats;
     const acc = accuracy();
-    const key = 'best:' + S.songId + ':' + settings.mode + ':' + settings.hands;
+    const key = 'best:' + S.songId + ':' + settings.mode + ':' + settings.hands +
+      (settings.fit ? ':fit' + settings.fitLow : '') + (settings.simplify ? ':s' + settings.chordMax : '');
     const prev = store.get(key, null);
     const isBest = acc != null && (!prev || acc > prev.acc || (acc === prev.acc && settings.speed > prev.speed));
     if (isBest) store.set(key, { acc, speed: settings.speed, at: Date.now() });
@@ -288,6 +299,15 @@
   function noteOn(p, vel) {
     if (S.pressed.has(p)) return;
     S.pressed.add(p);
+    if (S.calibrating) {
+      // 设定小键盘最低音：按下的是最左边的键
+      S.calibrating = false;
+      settings.fitLow = Math.min(96, Math.max(21, p));
+      saveSettings();
+      syncAdaptUi();
+      reapply();
+      return;
+    }
     if (settings.mySound) S.voices.set(p, synth.start(p, vel / 127));
     if (!S.song || settings.mode === 'demo') return;
     if (!S.playing) {
@@ -403,11 +423,18 @@
 
   function computeRange() {
     let lo, hi;
-    if (settings.range !== 'auto' && RANGES[settings.range]) {
+    const diff = settings.showDiff && (settings.fit || settings.simplify);
+    if (settings.fit && !diff) {
+      [lo, hi] = [settings.fitLow, settings.fitLow + 36];
+    } else if (settings.range !== 'auto' && RANGES[settings.range] && !diff) {
       [lo, hi] = RANGES[settings.range];
     } else if (S.notes.length) {
       let mn = 127, mx = 0;
       for (const n of S.notes) { if (n.pitch < mn) mn = n.pitch; if (n.pitch > mx) mx = n.pitch; }
+      if (diff) {
+        for (const g of S.ghosts) { if (g.pitch < mn) mn = g.pitch; if (g.pitch > mx) mx = g.pitch; }
+        if (settings.fit) { mn = Math.min(mn, settings.fitLow); mx = Math.max(mx, settings.fitLow + 36); }
+      }
       lo = mn - (mn % 12);
       hi = mx % 12 === 0 ? mx : mx + (12 - mx % 12);
       while (hi - lo < 24) { if (lo > 36) lo -= 12; else hi += 12; }
@@ -432,6 +459,7 @@
   }
 
   const inRange = p => p >= geo.lo && p <= geo.hi;
+  const outOfFit = p => settings.fit && (p < settings.fitLow || p > settings.fitLow + 36);
   const label = p => settings.labels === 'solfege' ? SOLFEGE[p % 12] : settings.labels === 'name' ? NAMES[p % 12] : '';
 
   function rr(x, y, w, h, r) {
@@ -496,6 +524,15 @@
       }
     }
 
+    // 对比模式：小键盘弹不到的轨道打上红色底
+    const diff = settings.showDiff && (settings.fit || settings.simplify);
+    if (diff && settings.fit) {
+      ctx.fillStyle = 'rgba(255,92,92,0.07)';
+      for (let p = lo; p <= hi; p++) {
+        if (p < settings.fitLow || p > settings.fitLow + 36) ctx.fillRect(geo.x[p], 0, geo.w[p], hitY);
+      }
+    }
+
     // 音符
     const sounding = new Map();
     if (S.song) {
@@ -503,6 +540,7 @@
       ctx.beginPath();
       ctx.rect(0, 0, W, hitY);
       ctx.clip();
+      if (diff) drawGhosts(hitY, pps, t, span);
       const notes = S.notes;
       const i0 = lowerBound(notes, t - S.song.maxDur - 0.01);
       let i1 = i0;
@@ -560,8 +598,18 @@
       ctx.strokeStyle = '#3ddc84';
       ctx.lineWidth = 2;
       ctx.stroke();
+    } else if (n.moved && settings.showDiff) {
+      ctx.strokeStyle = GHOST.moved;
+      ctx.lineWidth = 2;
+      ctx.stroke();
     }
     ctx.globalAlpha = 1;
+    if (n.moved && settings.showDiff && w >= 14 && h >= 30) {
+      ctx.font = '700 10px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillText(n.moved > 0 ? '↑' + n.moved : '↓' + -n.moved, x + w / 2, yTop + 12);
+    }
     const lb = label(n.pitch);
     if (lb && w >= 12 && h >= 14 && n.state !== 3) {
       const fs = Math.min(13, Math.max(8, w * 0.42));
@@ -570,6 +618,28 @@
       ctx.fillStyle = 'rgba(0,0,0,0.65)';
       ctx.fillText(lb, x + w / 2, yBot - 4);
     }
+  }
+
+  // 修改前的位置：虚线框。黄 = 挪了八度，红 = 整段删掉，紫 = 简化去掉
+  const GHOST = { moved: '#ffd166', dropped: '#ff5c5c', simplified: '#c77dff' };
+  function drawGhosts(hitY, pps, t, span) {
+    const gs = S.ghosts;
+    let i = lowerBound(gs, t - (S.song.maxDur || 0) - 0.01);
+    ctx.setLineDash([4, 3]);
+    ctx.lineWidth = 1.5;
+    for (; i < gs.length && gs[i].start <= t + span; i++) {
+      const g = gs[i];
+      if (g.start + g.dur < t || !inRange(g.pitch)) continue;
+      const x = geo.x[g.pitch], w = geo.w[g.pitch];
+      const yBot = hitY - (g.start - t) * pps;
+      const h = Math.max(4, g.dur * pps - 2);
+      rr(x + 1.5, yBot - h, w - 3, h, Math.min(5, w / 4));
+      ctx.fillStyle = hexA(GHOST[g.kind], 0.12);
+      ctx.fill();
+      ctx.strokeStyle = GHOST[g.kind];
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
   }
 
   function drawKeyboard(top, kbH, now, expect, sounding, pulse) {
@@ -590,7 +660,7 @@
       if (isBlack(p)) continue;
       const x = geo.x[p], w = geo.w[p];
       const f = keyFill(p);
-      ctx.fillStyle = f || '#f2f2ee';
+      ctx.fillStyle = f || (outOfFit(p) ? '#8c8f96' : '#f2f2ee');
       rr(x + 0.5, top + 1, w - 1, kbH - 2, Math.min(4, w / 5));
       ctx.fill();
       if (p % 12 === 0 || expect.has(p)) {
@@ -733,11 +803,85 @@
       sel.onchange = () => {
         S.partHands[p.id] = sel.value;
         store.set('hands:' + S.songId, S.partHands);
-        applyHands();
+        reapply();
       };
       row.appendChild(sel);
       box.appendChild(row);
     }
+  }
+
+  // ---------- 37 键适配 / 简化 ----------
+  function reapply() {
+    resetStats();
+    applyHands();
+    renderChanges();
+  }
+
+  function syncAdaptUi() {
+    document.querySelectorAll('#adaptSeg button').forEach(b => b.classList.toggle('on', !!settings[b.dataset.toggle]));
+    const sel = $('#fitLow');
+    if (!sel.options.length) {
+      for (let p = 21; p <= 72; p++) {
+        if (isBlack(p)) continue;
+        const o = document.createElement('option');
+        o.value = p; o.textContent = noteName(p) + ' – ' + noteName(p + 36);
+        sel.appendChild(o);
+      }
+    }
+    if (![...sel.options].some(o => Number(o.value) === settings.fitLow)) {
+      const o = document.createElement('option');
+      o.value = settings.fitLow; o.textContent = noteName(settings.fitLow) + ' – ' + noteName(settings.fitLow + 36);
+      sel.appendChild(o);
+    }
+    sel.value = settings.fitLow;
+    $('#octaveOnly').checked = settings.octaveOnly;
+    $('#chordMax').value = settings.chordMax;
+    $('#calibrate').textContent = S.calibrating ? '请在琴上按最左边的键…' : '在琴上按最左边的键来设定';
+  }
+
+  const HAND = { R: '右手', L: '左手' };
+  const shiftText = s => s % 12 === 0 ? (s > 0 ? '升高 ' : '降低 ') + Math.abs(s / 12) + ' 个八度' : (s > 0 ? '升高 ' : '降低 ') + Math.abs(s) + ' 个半音';
+  function changeText(c) {
+    switch (c.type) {
+      case 'transpose': return ['全曲', shiftText(c.shift)];
+      case 'move': return [HAND[c.hand], shiftText(c.octaves * 12) + '（' + c.count + ' 个音）'];
+      case 'drop': return [HAND[c.hand], '跨度 ' + noteName(c.span[0]) + '–' + noteName(c.span[1]) + ' 放不进，删除 ' + c.count + ' 个音'];
+      case 'simplify': return [HAND[c.hand], '和弦精简，去掉 ' + c.count + ' 个音'];
+      case 'merge': return ['双手', '挪动后重叠，合并 ' + c.count + ' 个音'];
+    }
+    return ['', ''];
+  }
+
+  function renderChanges() {
+    const box = $('#changes');
+    const sum = $('#changeSummary');
+    box.innerHTML = '';
+    if (!settings.fit && !settings.simplify) {
+      sum.textContent = '打开工具栏上的「37键」或「简化」后，这里会列出改动。';
+      return;
+    }
+    const cnt = { move: 0, drop: 0, simplify: 0, merge: 0 };
+    const notes = { move: 0, drop: 0, simplify: 0, merge: 0 };
+    S.changes.forEach(c => { if (c.type in cnt) { cnt[c.type]++; notes[c.type] += c.count; } });
+    const parts = [];
+    if (S.shift) parts.push('全曲' + shiftText(S.shift));
+    if (cnt.move) parts.push(`挪动 ${cnt.move} 段（${notes.move} 音）`);
+    if (cnt.drop) parts.push(`删除 ${cnt.drop} 段（${notes.drop} 音）`);
+    if (cnt.simplify) parts.push(`简化去掉 ${notes.simplify} 音`);
+    if (cnt.merge) parts.push(`合并 ${notes.merge} 音`);
+    sum.textContent = parts.length ? parts.join('，') + '。点一行跳到那里。' : '这首曲子不用改动。';
+    S.changes.slice(0, 600).forEach(c => {
+      const [who, what] = changeText(c);
+      const row = document.createElement('button');
+      row.className = 'change ' + c.type;
+      row.innerHTML = `<span class="bar">第 ${c.bar + 1} 小节</span><span class="who">${who}</span><span class="what">${what}</span>`;
+      row.onclick = () => {
+        pause();
+        seek(c.t - 0.5 * settings.speed);
+        if (!settings.showDiff) { settings.showDiff = true; saveSettings(); syncAdaptUi(); computeRange(); }
+      };
+      box.appendChild(row);
+    });
   }
 
   function updateLoopBand() {
@@ -841,9 +985,22 @@
     document.querySelectorAll('#handSeg button').forEach(b => b.onclick = () => {
       settings.hands = b.dataset.hands;
       saveSettings(); syncSegs();
-      resetStats();
-      applyHands();
+      reapply();
     });
+
+    document.querySelectorAll('#adaptSeg button').forEach(b => b.onclick = () => {
+      const k = b.dataset.toggle;
+      settings[k] = !settings[k];
+      saveSettings();
+      syncAdaptUi();
+      if (k === 'showDiff') computeRange();
+      else reapply();
+    });
+    $('#fitLow').onchange = e => { settings.fitLow = Number(e.target.value); saveSettings(); reapply(); };
+    $('#octaveOnly').onchange = e => { settings.octaveOnly = e.target.checked; saveSettings(); reapply(); };
+    $('#chordMax').onchange = e => { settings.chordMax = Number(e.target.value); saveSettings(); reapply(); };
+    $('#calibrate').onclick = () => { S.calibrating = !S.calibrating; syncAdaptUi(); };
+    syncAdaptUi();
 
     const panel = $('#settings');
     $('#settingsBtn').onclick = () => panel.classList.toggle('hidden');
