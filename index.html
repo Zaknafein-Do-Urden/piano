@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Piano Fall · 下落式钢琴练习</title>
+<meta name="description" content="连接电子琴，用下落音符的方式练习任意 MIDI 曲子">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎹</text></svg>">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header class="toolbar">
+  <div class="brand">🎹 Piano Fall</div>
+
+  <div class="group">
+    <select id="songSelect" title="选择曲目"></select>
+    <button id="importBtn" class="btn" title="导入 .mid 文件（也可以直接拖进窗口）">＋ 导入 MIDI</button>
+    <input type="file" id="fileInput" accept=".mid,.midi,audio/midi" hidden>
+  </div>
+
+  <div class="group">
+    <button id="restartBtn" class="btn icon" title="从头开始 (Home)">⏮</button>
+    <button id="playBtn" class="btn icon primary" title="播放 / 暂停 (空格)">▶</button>
+  </div>
+
+  <div class="group speed">
+    <span class="lbl">速度</span>
+    <input type="range" id="speed" min="10" max="150" step="5">
+    <span id="speedVal" class="val">100%</span>
+  </div>
+
+  <div class="group seg" id="modeSeg" title="模式">
+    <button data-mode="demo" title="自动演奏，先听一遍">演示</button>
+    <button data-mode="wait" title="走到音符就停下，等你按对再继续">等待</button>
+    <button data-mode="play" title="不等人，按节奏打分">跟弹</button>
+  </div>
+
+  <div class="group seg" id="handSeg" title="我弹哪只手">
+    <button data-hands="L">左手</button>
+    <button data-hands="both">双手</button>
+    <button data-hands="R">右手</button>
+  </div>
+
+  <div class="group right">
+    <button id="midiStatus" class="pill" title="点击重新连接 MIDI 设备">MIDI：检测中…</button>
+    <button id="settingsBtn" class="btn icon" title="设置">⚙</button>
+  </div>
+</header>
+
+<main id="stage">
+  <canvas id="canvas"></canvas>
+
+  <div id="hud">
+    <div id="hudCombo"></div>
+    <div id="hudStats"></div>
+    <div id="hudWait"></div>
+  </div>
+
+  <div id="centerMsg" class="center-msg"></div>
+
+  <div id="summary" class="modal hidden">
+    <div class="card">
+      <h2>完成！</h2>
+      <div id="summaryBody"></div>
+      <div class="row">
+        <button id="againBtn" class="btn primary">再来一次</button>
+        <button id="closeSummaryBtn" class="btn">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="dropHint" class="drop-hint hidden">松开以导入 MIDI 文件</div>
+</main>
+
+<footer class="transport">
+  <span id="timeCur" class="time">0:00</span>
+  <div class="seek-wrap">
+    <input type="range" id="seek" min="0" max="1" step="0.01" value="0">
+    <div id="loopBand" class="loop-band hidden"></div>
+  </div>
+  <span id="timeTotal" class="time">0:00</span>
+  <div class="group">
+    <button id="setA" class="btn small" title="把当前位置设为循环起点">A</button>
+    <button id="setB" class="btn small" title="把当前位置设为循环终点">B</button>
+    <button id="clearLoop" class="btn small" title="取消循环">✕ 循环</button>
+  </div>
+</footer>
+
+<aside id="settings" class="panel hidden">
+  <div class="panel-head">
+    <h3>设置</h3>
+    <button id="closeSettings" class="btn icon">✕</button>
+  </div>
+
+  <section>
+    <h4>声部 / 左右手</h4>
+    <p class="hint">MIDI 里每个轨道分给哪只手。只有一个轨道时可以选「按音高分」（中央 C 及以上为右手）。</p>
+    <div id="tracks"></div>
+  </section>
+
+  <section>
+    <h4>显示</h4>
+    <label class="field">下落时长 <input type="range" data-setting="lookahead" min="1" max="6" step="0.5"> <span data-val="lookahead"></span></label>
+    <label class="field">音符标注
+      <select data-setting="labels">
+        <option value="name">音名 C D E</option>
+        <option value="solfege">唱名 do re mi</option>
+        <option value="none">不显示</option>
+      </select>
+    </label>
+    <label class="field">键盘范围
+      <select data-setting="range">
+        <option value="auto">自动（按曲子）</option>
+        <option value="49">49 键 C2–C6</option>
+        <option value="61">61 键 C2–C7</option>
+        <option value="76">76 键 E1–G7</option>
+        <option value="88">88 键 A0–C8</option>
+      </select>
+    </label>
+  </section>
+
+  <section>
+    <h4>声音</h4>
+    <label class="check"><input type="checkbox" data-setting="accomp"> 播放另一只手（伴奏）</label>
+    <label class="check"><input type="checkbox" data-setting="mySound"> 电脑为我按的键发声（琴没有喇叭时用）</label>
+    <label class="check"><input type="checkbox" data-setting="metronome"> 节拍器</label>
+    <label class="field">音量 <input type="range" data-setting="volume" min="0" max="1" step="0.05"></label>
+  </section>
+
+  <section>
+    <h4>曲库</h4>
+    <button id="deleteSong" class="btn danger small">从浏览器删除当前导入的曲子</button>
+  </section>
+
+  <section class="help">
+    <h4>怎么用</h4>
+    <ul>
+      <li>用 USB 线（或 USB-MIDI 线）把电子琴接到电脑，用 <b>Chrome / Edge</b> 打开本页，允许 MIDI 权限。</li>
+      <li><b>等待</b>模式最适合学新曲：音符落到线上就停，按对了才继续。先 30%–50% 速度，单手练熟再双手。</li>
+      <li>用 <b>A / B</b> 圈出难的小节反复循环。</li>
+      <li>快捷键：空格 播放/暂停，← → 上/下一小节，↑ ↓ 调速度，Home 回到开头。</li>
+      <li>没接琴也能试：电脑键盘 <code>A W S E D F T G Y H U J K</code> 对应 C4 起的一个八度，<code>Z</code>/<code>X</code> 换八度；也可以直接点屏幕上的琴键。</li>
+    </ul>
+  </section>
+</aside>
+
+<script src="js/midi.js"></script>
+<script src="js/songs.js"></script>
+<script src="js/synth.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
